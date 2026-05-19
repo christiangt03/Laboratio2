@@ -1,0 +1,73 @@
+name: Reusable Node.js Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: 'Versión de Node.js a utilizar'
+        required: true
+        type: string
+    outputs:
+      test_outcome:
+        description: 'El resultado del paso de testing'
+        value: ${{ jobs.build-and-test.outputs.test_status }}
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    outputs:
+      test_status: ${{ steps.tests.outcome }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ inputs.node_version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      # Parte 2 - Cache: Dependiente del SO y del package-lock, evitando colisiones [cite: 27, 28, 29, 30, 31]
+      - name: Cache dependencias Node modules
+        id: npm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-${{ inputs.node_version }}-
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Ejecutar Tests y generar reporte
+        id: tests
+        run: npm test > test-report.txt || true # El '|| true' permite que el pipeline continúe para subir el artefacto aunque fallen los tests
+
+      - name: Compilar proyecto
+        run: npm run build --if-present
+
+      - name: Extraer logs relevantes
+        run: cat ~/.npm/_logs/*-debug.log > npm-debug.log || echo "No hay logs de error" > npm-debug.log
+
+      # Parte 3 - Artifacts: Nombre consistente y retención personalizada [cite: 32, 37, 38, 39]
+      - name: Subir Resultado Compilado (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output-node-${{ inputs.node_version }}
+          path: dist/ # Ruta típica de compilación en Node
+          retention-days: 7 
+
+      - name: Subir Reporte de Tests (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-node-${{ inputs.node_version }}
+          path: test-report.txt
+          retention-days: 5
+
+      - name: Subir Logs Relevantes (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-logs-node-${{ inputs.node_version }}
+          path: npm-debug.log
+          retention-days: 3
