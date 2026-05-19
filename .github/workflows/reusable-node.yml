@@ -1,73 +1,128 @@
-name: Reusable Node.js Pipeline
-
+name: Reusable Node CI
+ 
 on:
   workflow_call:
     inputs:
-      node_version:
-        description: 'Versión de Node.js a utilizar'
+      node-version:
+        description: 'Versión de Node.js (ej. "18", "20", "22")'
         required: true
         type: string
+      working-directory:
+        description: 'Directorio del proyecto Node'
+        required: false
+        type: string
+        default: '.'
+      run-tests:
+        description: 'Ejecutar los tests'
+        required: false
+        type: boolean
+        default: true
+      build-script:
+        description: 'Script npm para el build'
+        required: false
+        type: string
+        default: 'build'
     outputs:
-      test_outcome:
-        description: 'El resultado del paso de testing'
-        value: ${{ jobs.build-and-test.outputs.test_status }}
-
+      test-result:
+        description: 'passed | failed | skipped'
+        value: ${{ jobs.build-test.outputs.test-result }}
+      artifact-name:
+        description: 'Nombre del artifact de build publicado'
+        value: ${{ jobs.build-test.outputs.artifact-name }}
+      cache-hit:
+        description: 'true si las dependencias se restauraron de cache'
+        value: ${{ jobs.build-test.outputs.cache-hit }}
+ 
+# Parte 5 — Seguridad: principio de mínimo privilegio
+permissions:
+  contents: read
+ 
 jobs:
-  build-and-test:
-    runs-on: ubuntu-latest
+  build-test:
+    runs-on: ubuntu-22.04
     outputs:
-      test_status: ${{ steps.tests.outcome }}
-    
+      test-result: ${{ steps.test.outputs.result }}
+      artifact-name: ${{ steps.set-artifact.outputs.name }}
+      cache-hit: ${{ steps.cache-npm.outputs.cache-hit }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js ${{ inputs.node_version }}
-        uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+ 
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4.4.0
         with:
-          node-version: ${{ inputs.node_version }}
-
-      # Parte 2 - Cache: Dependiente del SO y del package-lock, evitando colisiones [cite: 27, 28, 29, 30, 31]
-      - name: Cache dependencias Node modules
-        id: npm-cache
-        uses: actions/cache@v4
+          node-version: ${{ inputs.node-version }}
+ 
+      # ───── Parte 2 — Cache ─────
+      # Clave compuesta:
+      #   runner.os    → evita colisión entre Linux/macOS/Windows
+      #   node-version → evita reusar node_modules de otra versión
+      #   hashFiles()  → invalida cuando cambia package-lock.json
+      - name: Restore npm cache
+        id: cache-npm
+        uses: actions/cache@v4.2.2
         with:
-          path: ~/.npm
-          key: ${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('**/package-lock.json') }}
+          path: |
+            ~/.npm
+            ${{ inputs.working-directory }}/node_modules
+          key: ${{ runner.os }}-node${{ inputs.node-version }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
           restore-keys: |
-            ${{ runner.os }}-node-${{ inputs.node_version }}-
-
-      - name: Instalar dependencias
-        run: npm ci
-
-      - name: Ejecutar Tests y generar reporte
-        id: tests
-        run: npm test > test-report.txt || true # El '|| true' permite que el pipeline continúe para subir el artefacto aunque fallen los tests
-
-      - name: Compilar proyecto
-        run: npm run build --if-present
-
-      - name: Extraer logs relevantes
-        run: cat ~/.npm/_logs/*-debug.log > npm-debug.log || echo "No hay logs de error" > npm-debug.log
-
-      # Parte 3 - Artifacts: Nombre consistente y retención personalizada [cite: 32, 37, 38, 39]
-      - name: Subir Resultado Compilado (Artifact)
-        uses: actions/upload-artifact@v4
+            ${{ runner.os }}-node${{ inputs.node-version }}-npm-
+ 
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
+ 
+      - name: Run tests
+        id: test
+        if: ${{ inputs.run-tests }}
+        run: |
+          mkdir -p reports
+          if npm test 2>&1 | tee reports/test-output.log; then
+            echo "result=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+ 
+      - name: Skip tests marker
+        if: ${{ !inputs.run-tests }}
+        run: echo "result=skipped" >> "$GITHUB_OUTPUT"
+ 
+      - name: Build
+        run: npm run ${{ inputs.build-script }}
+ 
+      # ───── Parte 3 — Artifacts ─────
+      - name: Compute artifact name
+        id: set-artifact
+        run: echo "name=build-node${{ inputs.node-version }}-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+ 
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4.6.2
         with:
-          name: build-output-node-${{ inputs.node_version }}
-          path: dist/ # Ruta típica de compilación en Node
-          retention-days: 7 
-
-      - name: Subir Reporte de Tests (Artifact)
-        uses: actions/upload-artifact@v4
+          name: ${{ steps.set-artifact.outputs.name }}
+          path: ${{ inputs.working-directory }}/dist
+          retention-days: 14
+          if-no-files-found: error
+ 
+      - name: Upload test report
+        if: always() && inputs.run-tests
+        uses: actions/upload-artifact@v4.6.2
         with:
-          name: test-report-node-${{ inputs.node_version }}
-          path: test-report.txt
-          retention-days: 5
-
-      - name: Subir Logs Relevantes (Artifact)
-        uses: actions/upload-artifact@v4
+          name: test-report-node${{ inputs.node-version }}-${{ github.run_number }}
+          path: ${{ inputs.working-directory }}/reports/
+          retention-days: 7
+          if-no-files-found: warn
+ 
+      - name: Upload logs (only on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
         with:
-          name: npm-logs-node-${{ inputs.node_version }}
-          path: npm-debug.log
-          retention-days: 3
+          name: logs-node${{ inputs.node-version }}-${{ github.run_number }}
+          path: |
+            ${{ inputs.working-directory }}/reports/test-output.log
+            ${{ inputs.working-directory }}/npm-debug.log*
+          retention-days: 30
+          if-no-files-found: ignore
