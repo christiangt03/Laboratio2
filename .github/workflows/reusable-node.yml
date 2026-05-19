@@ -57,10 +57,6 @@ jobs:
           node-version: ${{ inputs.node-version }}
  
       # ───── Parte 2 — Cache ─────
-      # Clave compuesta:
-      #   runner.os    → evita colisión entre Linux/macOS/Windows
-      #   node-version → evita reusar node_modules de otra versión
-      #   hashFiles()  → invalida cuando cambia package-lock.json
       - name: Restore npm cache
         id: cache-npm
         uses: actions/cache@v4.2.2
