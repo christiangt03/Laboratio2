@@ -1,0 +1,63 @@
+name: CI
+ 
+on:
+  push:
+    branches: [develop, 'feature/**']
+  pull_request:
+    branches: [develop, main]
+ 
+permissions:
+  contents: read
+ 
+jobs:
+  # Dos llamadas explícitas → permite leer outputs por separado.
+  # (Usar matrix sobre un job 'uses:' impide acceder a outputs por elemento.)
+  build-node-18:
+    name: Build Node 18 (LTS)
+    uses: ./.github/workflows/reusable-node.yml
+    with:
+      node-version: '18'
+      working-directory: '.'
+      run-tests: true
+      build-script: 'build'
+ 
+  build-node-20:
+    name: Build Node 20 (LTS)
+    uses: ./.github/workflows/reusable-node.yml
+    with:
+      node-version: '20'
+      working-directory: '.'
+      run-tests: true
+      build-script: 'build'
+ 
+  # Lógica propia del consumidor: consume los outputs del reusable
+  summarize:
+    name: Summarize CI run
+    needs: [build-node-18, build-node-20]
+    runs-on: ubuntu-22.04
+    if: always()
+    steps:
+      - name: Render summary
+        run: |
+          {
+            echo "## CI summary"
+            echo ""
+            echo "| Node | Test result | Cache hit | Artifact |"
+            echo "|------|-------------|-----------|----------|"
+            echo "| 18   | ${{ needs.build-node-18.outputs.test-result }} | ${{ needs.build-node-18.outputs.cache-hit }} | ${{ needs.build-node-18.outputs.artifact-name }} |"
+            echo "| 20   | ${{ needs.build-node-20.outputs.test-result }} | ${{ needs.build-node-20.outputs.cache-hit }} | ${{ needs.build-node-20.outputs.artifact-name }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+ 
+      - name: Fail if any build failed
+        if: needs.build-node-18.result != 'success' || needs.build-node-20.result != 'success'
+        run: |
+          echo "::error::Alguna build de la matriz falló"
+          exit 1
+ 
+  notify:
+    name: Notify on success
+    needs: summarize
+    runs-on: ubuntu-22.04
+    if: success()
+    steps:
+      - run: echo "Aquí enviarías Slack/Teams/correo o abrirías un PR de release."
